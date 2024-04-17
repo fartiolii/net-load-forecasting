@@ -183,11 +183,10 @@ GAM_models <- readRDS(file="GAM_models_node")
 
 
 
-
-# Dynamic KF - Optimization of Q, sigma, P_1|0 and theta_init
+# Dynamic KF - Optimization of Q, sigma, P_1|0 and theta_1|0
 
 # Function which maps the matrix of features and the coefficients of the GAM model (more than 600) 
-# to its terms (20 terms in the GAM_Point model) which are the only ones to be adapted
+# to its terms (20 terms in the GAM_Point model + Intercept) which are the only ones to be adapted
 
 f <- function(df, GAM_model) {
   model_matrix <- predict(GAM_model, newdata=df, type = "lpmatrix")
@@ -212,7 +211,10 @@ f <- function(df, GAM_model) {
       features_eval[, f] <- model_matrix[, col_range] %*% coef_vector[col_range]
     }
   }
-  return(as.matrix(features_eval[,2:ncol(features_eval)]))
+  # First column is the intercept
+  features_eval[, 1] <- 1
+  
+  return(as.matrix(features_eval))
 }
 
 
@@ -236,6 +238,9 @@ for (N in allNs) {
   saveRDS(res, file=file_path)
 }
 
+
+
+
 # Dynamic KF predictions with the obtained matrices
 y_kf_dynamic <- list()
 y_kf_dynamic_delay <- list()
@@ -244,45 +249,37 @@ source("utils.R")
 
 for(N in allNs){
   print(N)
-  file_path <- file.path("DynamicKF_Matrices", sprintf("dynKF_matrices_%s.Rda"))
+  file_path <- file.path("DynamicKF_Matrices", sprintf("dynKF_matrices_%s_delay.Rda", N))
   res <- readRDS(file=file_path)
-  kf <- Kalman_Filter(GAM_models[[N]], Q=diag(diag(res$Q)), sigma=res$sig, P=res$P, theta1=res$theta) 
+  kf <- Kalman_Filter(GAM_models[[N]], Q=diag(diag(res$Q)), sigma=res$sig, P=res$P) #, theta1=res$theta) 
   
   kf <- kf$fit(kf,NodeTrain[[N]][721:nrow(NodeTrain[[N]])], NodeTrain[[N]][["node"]][721:nrow(NodeTrain[[N]]) ])
   y_kf_dynamic[[N]] <- kf$predict(kf, NodeTest[[N]], Y_test=NodeTest[[N]][["node"]])
   y_kf_dynamic_delay[[N]] <- kf$predict(kf, NodeTest[[N]], Y_test=NodeTest[[N]], delay=TRUE)
   
-  file_path <- file.path(file.path("..", "Code/Other_data/KF R"), sprintf("Group%s_KF_dynamic.Rda", N))
+  
+  file_path <- file.path(file.path("..", "Python/Other_data/KF R"), sprintf("Group%s_KF_dynamic.Rda", N))
   saveRDS(y_kf_dynamic[[N]][["y_mean"]], file=file_path)
-  file_path <- file.path(file.path("..", "Code/Other_data/KF R"), sprintf("Group%s_KF_dynamic_delay.Rda", N))
+  file_path <- file.path(file.path("..", "Python/Other_data/KF R"), sprintf("Group%s_KF_dynamic_delay.Rda", N))
   saveRDS(y_kf_dynamic_delay[[N]][["y_mean"]], file=file_path)
 }
 
 
 
-# Dynamic KF prediction with matrices obtained by optimizing either
-# - the RMSE or the Likelihood on a grid of q_values and sigma_values 
-# - the Likelihood on a grid of q* values
+# Dynamic KF prediction with matrices obtained by optimizing the Likelihood on a grid of q* values
 
 y_kf_dynamic <- list()
 y_kf_dynamic_delay <- list()
 
 source("utils.R")
 
-q_list <- c(1e-10,1e-11,1e-12, 1e-13, 1e-14,1e-15,1e-16)
-sigma_list <- c(1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.1, 0.08, 0.06, 0.04, 0.01, 0.008)
+q_list <- c(1e-14,1e-15,1e-16, 1e-17,1e-18)
 
 
 for(N in allNs){
   print(N)
   # Initialization of the optimization object with the training set
   optim <- QOptimization$new(gam_model=GAM_models[[N]],NodeTrain[[N]][721:nrow(NodeTrain[[N]])], NodeTrain[[N]][721:nrow(NodeTrain[[N]]) ])
-  
-  # Maximization of the likelihood on the grid of q and sigma
-  res <- optim$grid_search(q_list=q_list, sigma_list=sigma_list, method="Likelihood")#, std_static=std_theta_static[[N]])
-  
-  # Minimization of the RMSE on the grid of q and sigma
-  res <- optim$grid_search(q_list=q_list, sigma_list=sigma_list, method="RMSE")#, std_static=std_theta_static[[N]])
   
   # Maximization of the likelihood on the grid of q*
   res <- optim$grid_search_reduced_likelihood(q_list=q_list) #, std_static=std_theta_static[[N]])
@@ -294,7 +291,7 @@ for(N in allNs){
   y_kf_dynamic_delay[[N]] <- kf$predict(kf, NodeTest[[N]], Y_test=NodeTest[[N]], delay=TRUE)
   
   
-  file_path <- file.path(file.path("..", "Code/Other_data/KF R"), sprintf("Group%s_KF_dynamic_delay.Rda", N))
+  file_path <- file.path(file.path("..", "Python/Other_data/KF R"), sprintf("Group%s_KF_dynamic_delay.Rda", N))
   saveRDS(y_kf_dynamic_delay[[N]][["y_mean"]], file=file_path)
 }
 print(RMSE(y_kf_dynamic_delay[[N]][["y_mean"]], NodeTest[[N]][["node"]]))
@@ -306,19 +303,21 @@ print(MAE(y_kf_dynamic_delay[[N]][["y_mean"]], NodeTest[[N]][["node"]]))
 # The best prediction results to date (for the 48h delay case) have been obtained with 
 # the same sigma and Q for all regions: q=1e-13 and sigma=0.08
 sigma <- 0.08
-
+q <- 1e-13
 for(N in allNs){
   print(N)
-  kf <- Kalman_Filter(GAM_models[[N]], Q=diag(rep(1e-13, 20)), 
+  kf <- Kalman_Filter(GAM_models[[N]], Q=diag(rep(q, 21)), 
                                   sigma=sigma,
-                                  P=diag(rep(1, 20)*sigma^2))
+                                  P=diag(rep(1, 21)*sigma^2))
   
   kf <- kf$fit(kf,NodeTrain[[N]][721:nrow(NodeTrain[[N]])], NodeTrain[[N]][["node"]][721:nrow(NodeTrain[[N]]) ])
-  y_kf_dynamic_delay[[N]] <- kf$predict(kf, NodeTest[[N]], Y_test=NodeTest[[N]], delay=TRUE)
+  y_kf_dynamic_delay[[N]] <- kf$predict(kf, NodeTest[[N]], Y_test=NodeTest[[N]], delay=TRUE, const_delay=FALSE)
 
-  file_path <- file.path(file.path("..", "Code/Other_data/KF R"), sprintf("Group%s_KF_dynamic_delay.Rda", N))
+  file_path <- file.path(file.path("..", "Python - to send/Other_data/KF R"), sprintf("Group%s_KF_dynamic_delay_fxd.Rda", N))
   saveRDS(y_kf_dynamic_delay[[N]][["y_mean"]], file=file_path)
 }
+print(RMSE(y_kf_dynamic_delay[[N]][["y_mean"]], NodeTest[[N]][["node"]]))
+print(MAE(y_kf_dynamic_delay[[N]][["y_mean"]], NodeTest[[N]][["node"]]))
 
 
 

@@ -196,17 +196,23 @@ for(N in allNs){
   kf <- kf$fit(kf,NodeTrain[[N]][721:nrow(NodeTrain[[N]])], NodeTrain[[N]][["node"]][721:nrow(NodeTrain[[N]]) ])
   # Prediction which use data from the previous 30 min
   y_kf_static[[N]] <- kf$predict(kf, NodeTest[[N]], Y_test=NodeTest[[N]][["node"]])
+  
   # Prediction which take into account the 48h delay in receiving data
   y_kf_static_delay[[N]] <- kf$predict(kf, NodeTest[[N]], Y_test=NodeTest[[N]], delay=TRUE)
+  
   # Vector of standard deviations for each parameter in theta (to be used for the optimization of the variances of the Dynamic KF)
   std_theta_static[[N]] <- apply(kf$theta_mat[1000:nrow(kf$theta_mat),], 2, sd)
 }
+print(RMSE(y_kf_static_delay[[N]][["y_mean"]], NodeTest[[N]][["node"]]))
+print(MAE(y_kf_static_delay[[N]][["y_mean"]], NodeTest[[N]][["node"]]))
+
+
 
 # Saving prediction results to file to be read with Python
 for (N in allNs) {
-  file_path <- file.path(file.path("..", "Code/Other_data/KF R"), sprintf("Group%s_KF_static.Rda", N))
+  file_path <- file.path(file.path("..", "Python/Other_data/KF R"), sprintf("Group%s_KF_static.Rda", N))
   saveRDS(y_kf_static[[N]][["y_mean"]], file=file_path)
-  file_path <- file.path(file.path("..", "Code/Other_data/KF R"), sprintf("Group%s_KF_static_delay.Rda", N))
+  file_path <- file.path(file.path("..", "Python/Other_data/KF R"), sprintf("Group%s_KF_static_delay.Rda", N))
   saveRDS(y_kf_static_delay[[N]][["y_mean"]], file=file_path)
 }
 
