@@ -116,13 +116,16 @@ def regression_feature_matrix(df):
                    
                    # Temperature
                    temp, temp**2, 
+                   
                    x2t_sm, x2t_sm**2, x2t_sm**3,
+                   
                    temp*np.cos(wd*clock_hour), temp*np.sin(wd*clock_hour),
                    temp*np.cos(2*wd*clock_hour), temp*np.sin(2*wd*clock_hour),
                    temp*np.cos(3*wd*clock_hour), temp*np.sin(3*wd*clock_hour), 
                    
                    # Precipitations
                    prec, prec**2, 
+                   
                    prec*np.cos(wd*clock_hour), prec*np.sin(wd*clock_hour),
                    prec*np.cos(2*wd*clock_hour), prec*np.sin(2*wd*clock_hour),
                    
