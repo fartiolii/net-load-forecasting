@@ -9,11 +9,10 @@ from scipy.stats import norm
 import copy
 import warnings
 
-# Reference: [1] Joseph de Vilmarest, "Modèles espace-état pour la prévision de séries temporelles. Application aux marchés électriques."
-
 
 groups = [(0, 1), (1, 2), (2, 10), (10, 14), (14, 18), (18,22), (22, 28),
-          (28, 37), (37, 42), (42,47),(47, 53), (53,55),(55, 59), (59, 60), (60, 61), (61, 62)] 
+          (28, 36), (36, 41), (41,47),(47, 52), (52,55),(55, 58), (58, 59), (59, 60), (60, 61)] 
+
 
 ######## Kalman Filter Class
 
@@ -46,7 +45,7 @@ class Kalman_Filter(object):
         
     def f(self, df, train=False):
         """Method that given the feature matrix n_obs*n_features returns:
-           - a matrix n_obs*n_groups if the number of parameters to adapt is lower than the number of features used (in the case of GAM or linear regression                if total_mat is False)
+           - a matrix n_obs*n_groups if the number of parameters to adapt is lower than the number of features used (in the case of GAM or linear                        regression if total_mat is False)
            - the matrix itself if all parameters are adapted in the linear regression case"""
         
         if self.GAM == True:
@@ -77,11 +76,13 @@ class Kalman_Filter(object):
         
         
     def theta_update(self, f_Xt, yt):
+        # Implementation formula (3.5)
         # update of theta with new data yt
         self.theta += self.P@f_Xt / (self.sigma**2) * (yt - self.theta.T@f_Xt)
 
         
     def P_update(self, f_Xt, yt):
+        # Implementation formula (3.4)
         # update of matrix P
         self.P += -(self.P@f_Xt@f_Xt.T@self.P)/(f_Xt.T@self.P@f_Xt + self.sigma**2)
 
@@ -116,10 +117,12 @@ class Kalman_Filter(object):
         
             
     
-    def predict(self, X_test, Y_test, delay=False):
+    def predict(self, X_test, Y_test, delay=False, const_delay=True):
         """After having trained the KF with the method fit, this method computes the predictions on the test set given in input
            by either using the measurement from 30 minutes before (delay=False) or by considering the fact that, every day, data is 
            obtained at midnight of the day after (delay=True)
+           const_delay: Bool, True if we incorporate past data in the model with a constant delay of 48h, False if instead we take into 
+                        account the fact that at midnight of each day, we get all data regarding the past 48 to 24 hours 
         """
         if self.theta_mat is None:
             print("Kalman Filter must be trained first")
@@ -148,17 +151,111 @@ class Kalman_Filter(object):
             self.theta = theta_init        # Initial value of theta is copied back in the state vector of the object KF
             self.P = P_init                # Initial value of P is copied back in the variance-covariance matrix of the object KF
         else:
-            # In this case, to predict the value of every 30 min throughout a single day, we are using all measurements up to the midnight before (which are             # measurements that go from 48h to 24h before the midnight). e.g. the prediction of values from 25/01 at 00:00 to 25/01 at 23:30 occurs the                 # 25/01 at 00:00 with new measurement data incorporated in the model which goes from 23/01 at 00:00 to 23/01 at 23:30.
-            
             Y_target = Y_test['targetTime'] # Target time of the prediction to make 
             Y_test = np.array(Y_test[Y_test.columns[1]]) # Target value to predict given in input (can be net-load, 7 days differences etc.)
             f_Xtest = self.f(X_test) # Evaluation matrix of the features of the test set, according to which parameters to adapt
             n_test = f_Xtest.shape[0]
             y_mean = np.zeros(n_test,) # vector of mean predictions is initialized
             y_std = np.zeros(n_test,)  # vector of the standard deviation of the predictions is initialized
+            
+            if const_delay is False:
+                # In this case, to predict the value of every 30 min throughout a single day, we are using all measurements up to the midnight before                       # (which are measurements that go from 48h to 24h before the midnight). e.g. the prediction of values from 25/01 at 00:00 to 25/01 at 23:30                 # occurs the 25/01 at 00:00 with new measurement data incorporated in the model which goes from 23/01 at 00:00 to 23/01 at 23:30.
+   
+                theta_init = self.theta.copy() # Initial value of theta is saved (as the prediction should not change theta/P)
+                P_init = self.P.copy()         # Initial value of P is saved (as the prediction should not change theta/P)
 
-            theta_init = self.theta.copy() # Initial value of theta is saved (as the prediction should not change theta/P)
-            P_init = self.P.copy()         # Initial value of P is saved (as the prediction should not change theta/P)
+                for t in range(n_test):
+                    # We check if the target time of the prediction corresponds to midnight 
+                    if Y_target.iloc[t].hour == 0 and Y_target.iloc[t].minute == 0:
+                        # We check if data from 48h to 24h before is available (condition not true just at the beginning of the dataset)
+                        if t-96 >= 0:
+                            # KF is updated with measurements from 48h to 24h before (which correspond to indexes -96 to -48 since we have half an hour                                 # data)
+                            ft = f_Xtest[t-96:t-48,:]
+                            yt = Y_test[t-96:t-48]
+                            # For cycle that updates the KF with 48 measurements (which correspond to 24h data)
+                            for j in range(ft.shape[0]):
+                                f_t = ft[j,:].reshape(-1,1)
+                                y_t = yt[j]
+                                self.P_update(f_t,y_t)
+                                self.theta_update(f_t,y_t)
+                                self.P += self.Q
+
+                        # Prediction of the next 24h are computed 
+                        ft = f_Xtest[t:t+48,:]
+                        y_mean[t:t+48] = (ft@self.theta).flatten()
+
+                        # The prediction of the standard deviation requires to sum k-times Q to P, where k represents the number of steps ahead of the                               # prediction that we are doing
+                        P = self.P + 48*self.Q
+                        for idx in range(t, t+48):
+                            f_t = f_Xtest[idx,:].reshape(-1,1)
+                            P += self.Q
+                            y_std[idx] = np.sqrt(self.sigma**2 + f_t.T@P@f_t)
+
+
+                self.theta = theta_init      # Initial value of theta is copied back in the state vector of the object KF
+                self.P = P_init              # Initial value of P is copied back in the variance-covariance matrix of the object KF
+
+            else:
+                # In this case we use the data to update the model as if data is constantly arriving with a 48h delay throughout the day. At each time                     # instant we update the model with the measurement of 48h before and then predict the new value of yt.
+                
+                theta_init = self.theta.copy() # Initial value of theta is saved (as the prediction should not change theta/P)
+                P_init = self.P.copy()         # Initial value of P is saved (as the prediction should not change theta/P)
+
+                # For cycle that computes predictions for all the test set in input
+                for t in range(n_test):
+                    if t >= 96:
+                        # Model update with the measurement from 48h before
+                        ft = f_Xtest[t-96,:].reshape(-1,1)
+                        self.P_update(ft, Y_test[t-96])                            # Compute P_t|t
+                        self.theta_update(ft, Y_test[t-96])                        # Update theta
+                        self.P += self.Q                                        # Compute P_t+1|t
+                    
+                    # Prediction
+                    ft = f_Xtest[t,:].reshape(-1,1)
+                    y_mean[t] = self.theta.T@ft                                         # Mean prediction
+                    y_std[t] = np.sqrt(self.sigma**2 + ft.T@(self.P+95*self.Q)@ft)      # Standard deviation of the prediction
+
+
+                self.theta = theta_init        # Initial value of theta is copied back in the state vector of the object KF
+                self.P = P_init                # Initial value of P is copied back in the variance-covariance matrix of the object KF
+                
+        return y_mean, y_std
+    
+    
+    
+    
+    # The following two methods are used for the optimization of the variances of the dynamic Kalman Filter only
+    
+    def compute_reduced_likelihood(self, X_test, Y_test, const_delay=True, fit_theta1=False):
+        """Method that computes the likelihood (assuming delayed data) as in Formula (3.13) on the training set in input, given Q*.
+        It computes sigma (Formula 3.9) by maximizing the likelihood (given Q*) and therefore it's used for 
+        optimization of variances on a unique grid of q*."""
+        
+        Y_target = Y_test['targetTime'] # Target time of the prediction to make 
+        Y_test = np.array(Y_test[Y_test.columns[1]]) # Target value to predict given in input (can be net-load, 7 days differences etc.)
+        f_Xtest = self.f(X_test) # Evaluation matrix of the features of the test set, according to which parameters to adapt
+        n_test, d = f_Xtest.shape
+        self.d = d
+        y_mean = np.zeros(n_test,) # vector of mean predictions is initialized
+        y_std = np.zeros(n_test,)  # vector of the standard deviation of the predictions is initialized
+        
+        # Since Q*=Q/sigma^2 and P*=P/sigma^2 we can continue to use the previous notation (therefore Q and P) if we set sigma=1
+        self.sigma = 1
+        if fit_theta1:
+            # Optimization of theta_1|0 (prior) (Formula (3.11)) which in some cases perform worse than simply initializing to 0 the vector
+            self.theta1 = self.optimize_theta1(f_Xtest, Y_target, Y_test, const_delay=const_delay)
+        else:
+            self.theta1 = np.zeros((self.d,1))
+        self.theta = self.theta1.copy()
+        
+        if const_delay is False:
+        
+            theta_init = self.theta.copy()
+            P_init = self.P.copy()
+
+            # Computation of the likelihood (Fomula (3.13))
+            loglik = 0
+            err_norm_sigma = 0
 
             for t in range(n_test):
                 # We check if the target time of the prediction corresponds to midnight 
@@ -176,176 +273,68 @@ class Kalman_Filter(object):
                             self.theta_update(f_t,y_t)
                             self.P += self.Q
 
-                    # Prediction of the next 24h are computed 
+                    # Predictions of the next 24h are computed 
                     ft = f_Xtest[t:t+48,:]
                     y_mean[t:t+48] = (ft@self.theta).flatten()
-                    
+
                     # The prediction of the standard deviation requires to sum k-times Q to P, where k represents the number of steps ahead of the                               # prediction that we are doing
-                    P = self.P.copy() + 48*self.Q
+                    P = self.P.copy()+ 48*self.Q
+                    corr_val = np.zeros((48,))
+                    i=0
                     for idx in range(t, t+48):
-                        f_t = f_Xtest[idx,:].reshape(-1,1)
+                        ft = f_Xtest[idx,:].reshape(-1,1)
                         P += self.Q
-                        y_std[idx] = np.sqrt(self.sigma**2 + f_t.T@P@f_t)
+                        y_std[idx] = np.sqrt(self.sigma**2 + ft.T@P@ft)
+
+                        corr_val[i] = self.sigma**2 + ft.T@P@ft
+                        i += 1
+
+                    err = (Y_test[t:t+48] - y_mean[t:t+48])**2
+                    loglik += np.sum(np.log(corr_val)) 
+                    err_norm_sigma += np.sum(err/corr_val)   
 
 
-            self.theta = theta_init      # Initial value of theta is copied back in the state vector of the object KF
-            self.P = P_init              # Initial value of P is copied back in the variance-covariance matrix of the object KF
-                
-        return y_mean, y_std
-    
-    
-    
-    
-    # The following three methods are used for the optimization of the variances of the dynamic Kalman Filter only
-    
-    def compute_likelihood(self, X_test, Y_test):
-        """Method that computes the likelihood (assuming delayed data) on the training set in input, given sigma and Q.
-        It's used for the optimization of the variances on a grid of q and sigma."""
-        
-        Y_target = Y_test['targetTime'] # Target time of the prediction to make 
-        Y_test = np.array(Y_test[Y_test.columns[1]]) # Target value to predict given in input (can be net-load, 7 days differences etc.)
-        f_Xtest = self.f(X_test) # Evaluation matrix of the features of the test set, according to which parameters to adapt
-        n_test, d = f_Xtest.shape
-        self.d = d
-        y_mean = np.zeros(n_test,) # vector of mean predictions is initialized
-        y_std = np.zeros(n_test,)  # vector of the standard deviation of the predictions is initialized
-    
-        # Inizialization of the matrices and of the likelihood
-        loglik = 0
-        if self.theta1 is None:
-            self.theta1 = np.zeros((self.d,1))
-        self.theta = self.theta1.copy()
-        
-        if self.P is None:
-            self.P = np.eye(self.d)
-            
-        theta_init = self.theta.copy() # Initial value of theta is saved (as the prediction should not change theta/P)
-        P_init = self.P.copy()         # Initial value of P is saved (as the prediction should not change theta/P)
-        
-
-        for t in range(n_test):
-            # We check if the target time of the prediction corresponds to midnight 
-            if Y_target.iloc[t].hour == 0 and Y_target.iloc[t].minute == 0:
-                # We check if data from 48h to 24h before is available (condition not true just at the beginning of the dataset)
-                if t-96 >= 0:
-                    # KF is updated with measurements from 48h to 24h before (which correspond to indexes -96 to -48 since we have half an hour data)
-                    ft = f_Xtest[t-96:t-48,:]
-                    yt = Y_test[t-96:t-48]
-                    # For cycle that updates the KF with 48 measurements (which correspond to 24h data)
-                    for j in range(ft.shape[0]):
-                        f_t = ft[j,:].reshape(-1,1)
-                        y_t = yt[j]
-                        self.P_update(f_t,y_t)
-                        self.theta_update(f_t,y_t)
-                        self.P += self.Q
-
-                # Prediction of the next 24h are computed 
-                ft = f_Xtest[t:t+48,:]
-                y_mean[t:t+48] = (ft@self.theta).flatten()
-                
-                # The prediction of the standard deviation requires to sum k-times Q to P, where k represents the number of steps ahead of the                               # prediction that we are doing
-                P = self.P.copy()+ 48*self.Q
-                corr_val = np.zeros((48,))
-                i=0
-                for idx in range(t, t+48):
-                    ft = f_Xtest[idx,:].reshape(-1,1)
-                    P += self.Q
-                    y_std[idx] = np.sqrt(self.sigma**2 + ft.T@P@ft)
-
-                    corr_val[i] = self.sigma**2 + ft.T@P@ft
-                    i += 1
-                    
-                err = (Y_test[t:t+48] - y_mean[t:t+48])**2
-                # Incremental computation of the loglikelihood as in pag 83 of [1]
-                loglik += np.sum(np.log(corr_val)) + np.sum(err/corr_val)    
-        
-        self.theta = theta_init      # Initial value of theta is copied back in the state vector of the object KF
-        self.P = P_init              # Initial value of P is copied back in the variance-covariance matrix of the object KF
-                
-        return y_mean, y_std, -0.5*loglik
-    
-    
-    def compute_reduced_likelihood(self, X_test, Y_test, fit_theta1=False):
-        """Method that computes the likelihood (assuming delayed data) on the training set in input, given Q*.
-        It computes sigma by minimizing the likelihood (given Q*) and therefore it's used for optimization of variances on a unique grid of q*."""
-        
-        Y_target = Y_test['targetTime'] # Target time of the prediction to make 
-        Y_test = np.array(Y_test[Y_test.columns[1]]) # Target value to predict given in input (can be net-load, 7 days differences etc.)
-        f_Xtest = self.f(X_test) # Evaluation matrix of the features of the test set, according to which parameters to adapt
-        n_test, d = f_Xtest.shape
-        self.d = d
-        y_mean = np.zeros(n_test,) # vector of mean predictions is initialized
-        y_std = np.zeros(n_test,)  # vector of the standard deviation of the predictions is initialized
-        
-        # Since Q*=Q/sigma^2 and P*=P/sigma^2 we can continue to use the previous notation (therefore Q and P) if we set sigma=1
-        self.sigma = 1
-        if fit_theta1:
-            # Optimization of theta_1|0 (prior) (eq (5.15) of [1]) which seems to perform worse than simply initializing to 0 the vector
-            self.theta1 = self.optimize_theta1(f_Xtest, Y_target, Y_test)
+            self.theta = theta_init
+            self.P = P_init
         else:
-            self.theta1 = np.zeros((self.d,1))
-        self.theta = self.theta1.copy()
+            # In this case we use the data to update the model as if data is constantly arriving with a 48h delay throughout the day. At each time                     # instant we update the model with the measurement of 48h before and then predict the new value of yt.
         
-        theta_init = self.theta.copy()
-        P_init = self.P.copy()
-        
-        # We compute both the likelihood with Q* and P* (eq (5.16) of [1]), and the one used by the previous method, computed after having estimated 
-        # sigma (eq (5.14) of [1]), which can be found at the end of pag. 83 of [1]
-        loglik = 0
-        loglik_2 = 0
-        err_norm_sigma = 0
+            theta_init = self.theta.copy() # Initial value of theta is saved (as the prediction should not change theta/P)
+            P_init = self.P.copy()         # Initial value of P is saved (as the prediction should not change theta/P)
 
-        for t in range(n_test):
-            # We check if the target time of the prediction corresponds to midnight 
-            if Y_target.iloc[t].hour == 0 and Y_target.iloc[t].minute == 0:
-                # We check if data from 48h to 24h before is available (condition not true just at the beginning of the dataset)
-                if t-96 >= 0:
-                    # KF is updated with measurements from 48h to 24h before (which correspond to indexes -96 to -48 since we have half an hour data)
-                    ft = f_Xtest[t-96:t-48,:]
-                    yt = Y_test[t-96:t-48]
-                    # For cycle that updates the KF with 48 measurements (which correspond to 24h data)
-                    for j in range(ft.shape[0]):
-                        f_t = ft[j,:].reshape(-1,1)
-                        y_t = yt[j]
-                        self.P_update(f_t,y_t)
-                        self.theta_update(f_t,y_t)
-                        self.P += self.Q
+            loglik = 0
+            err_norm_sigma = 0
 
-                # Predictions of the next 24h are computed 
-                ft = f_Xtest[t:t+48,:]
-                y_mean[t:t+48] = (ft@self.theta).flatten()
-                
-                # The prediction of the standard deviation requires to sum k-times Q to P, where k represents the number of steps ahead of the                               # prediction that we are doing
-                P = self.P.copy()+ 48*self.Q
-                corr_val = np.zeros((48,))
-                i=0
-                for idx in range(t, t+48):
-                    ft = f_Xtest[idx,:].reshape(-1,1)
-                    P += self.Q
-                    y_std[idx] = np.sqrt(self.sigma**2 + ft.T@P@ft)
+            # For cycle that computes predictions for all the test set in input
+            for t in range(n_test):
+                if t >= 96:
+                    ft = f_Xtest[t-96,:].reshape(-1,1)
+                    self.P_update(ft, Y_test[t-96])                            # Compute P_t|t
+                    self.theta_update(ft, Y_test[t-96])                        # Update theta
+                    self.P += self.Q                                        # Compute P_t+1|t
 
-                    corr_val[i] = self.sigma**2 + ft.T@P@ft
-                    i += 1
-                    
-                err = (Y_test[t:t+48] - y_mean[t:t+48])**2
-                loglik += np.sum(np.log(corr_val)) 
-                loglik_2 += np.sum(np.log(corr_val) + err/corr_val)
-                err_norm_sigma += np.sum(err/corr_val)   
-                           
+                ft = f_Xtest[t,:].reshape(-1,1)
+                y_mean[t] = self.theta.T@ft                             # Mean prediction
 
-        self.theta = theta_init
-        self.P = P_init
-        # Estimation of sigma (eq (5.14) of [1])
+                err = (Y_test[t] - y_mean[t])**2
+                loglik += np.log(y_std[t]**2)
+                err_norm_sigma += err/y_std[t]**2
+
+
+            self.theta = theta_init        # Initial value of theta is copied back in the state vector of the object KF
+            self.P = P_init                # Initial value of P is copied back in the variance-covariance matrix of the object KF
+
+
+        # Estimation of sigma (Formula (3.9))
         self.sigma = np.sqrt(err_norm_sigma/n_test)
-        
-        loglik_2 = n_test*np.log(self.sigma**2) + loglik + 1/self.sigma**2*err_norm_sigma
+
         loglik += n_test*np.log(err_norm_sigma/n_test)
         
-        return y_mean, y_std, -0.5*loglik_2
+        return y_mean, y_std, -0.5*loglik 
     
     
-    def optimize_theta1(self, f_Xtest, Y_target, Y_test):
-        """Method which computes the optimized theta_1|0 given Q* and P_1|0=I by using formula (5.15) of [1]"""
+    def optimize_theta1(self, f_Xtest, Y_target, Y_test, const_delay=True):
+        """Method which computes the optimized theta_1|0 given Q* and P_1|0=I by using Formula (3.11)"""
         n_test, d = f_Xtest.shape
         y_mean = np.zeros(n_test,)
         
@@ -362,45 +351,67 @@ class Kalman_Filter(object):
         num = np.zeros((d,1))
         inv = np.zeros((d,d))
         
-        for t in range(n_test):
-            # We check if the target time of the prediction corresponds to midnight 
-            if Y_target.iloc[t].hour == 0 and Y_target.iloc[t].minute == 0:
-                # We check if data from 48h to 24h before is available (condition not true just at the beginning of the dataset)
-                if t-96 >= 0:
-                    # KF is updated with measurements from 48h to 24h before (which correspond to indexes -96 to -48 since we have half an hour data)
-                    ft = f_Xtest[t-96:t-48,:]
-                    yt = Y_test[t-96:t-48]
-                    # For cycle that updates the KF with 48 measurements (which correspond to 24h data) and computes matrix C
-                    for j in range(ft.shape[0]):
-                        f_t = ft[j,:].reshape(-1,1)
-                        y_t = yt[j]
-                        
-                        P_new += -(P_new@f_t@f_t.T@P_new)/(f_t.T@P_new@f_t + self.sigma**2)
-                        # Iterative computation of matrix C according to formula (5.7) of [1]
-                        C_matrix = (np.eye(d) - (P_new@f_t)@f_t.T)@C_matrix
-                        theta += P_new@f_t * (y_t - theta.T@f_t)/ (self.sigma**2) 
-                        P_new += self.Q
+        if const_delay is False:
+            for t in range(n_test):
+                # We check if the target time of the prediction corresponds to midnight 
+                if Y_target.iloc[t].hour == 0 and Y_target.iloc[t].minute == 0:
+                    # We check if data from 48h to 24h before is available (condition not true just at the beginning of the dataset)
+                    if t-96 >= 0:
+                        # KF is updated with measurements from 48h to 24h before (which correspond to indexes -96 to -48 since we have half an hour data)
+                        ft = f_Xtest[t-96:t-48,:]
+                        yt = Y_test[t-96:t-48]
+                        # For cycle that updates the KF with 48 measurements (which correspond to 24h data) and computes matrix C
+                        for j in range(ft.shape[0]):
+                            f_t = ft[j,:].reshape(-1,1)
+                            y_t = yt[j]
 
-                # Predictions of the next 24h are computed 
-                ft = f_Xtest[t:t+48,:]
-                y_mean[t:t+48] = (ft@self.theta).flatten()
-                
-                P = P_new.copy() + 48*self.Q
-                for idx in range(t, t+48):
-                    ft = f_Xtest[idx,:].reshape(-1,1)
-                    P += self.Q
+                            P_new += -(P_new@f_t@f_t.T@P_new)/(f_t.T@P_new@f_t + self.sigma**2)
+                            # Iterative computation of matrix C according to Formula (3.12)
+                            C_matrix = (np.eye(d) - (P_new@f_t)@f_t.T)@C_matrix
+                            theta += P_new@f_t * (y_t - theta.T@f_t)/ (self.sigma**2) 
+                            P_new += self.Q
+
+                    # Predictions of the next 24h are computed 
+                    ft = f_Xtest[t:t+48,:]
+                    y_mean[t:t+48] = (ft@self.theta).flatten()
+
+                    P = P_new.copy() + 48*self.Q
+                    for idx in range(t, t+48):
+                        ft = f_Xtest[idx,:].reshape(-1,1)
+                        P += self.Q
+
+                        num += (Y_test[idx] - y_mean[idx])/(self.sigma**2 + ft.T@P@ft)*C_matrix.T@ft
+                        inv += C_matrix.T@ft@ft.T@C_matrix/(self.sigma**2 + ft.T@P@ft)
+                        
+        else:
+            for t in range(n_test):
+                if t >= 96:
+                    ft = f_Xtest[t-96,:].reshape(-1,1)
+                    yt = Y_test[t-96]
                     
-                    num += (Y_test[idx] - y_mean[idx])/(self.sigma**2 + ft.T@P@ft)*C_matrix.T@ft
-                    inv += C_matrix.T@ft@ft.T@C_matrix/(self.sigma**2 + ft.T@P@ft)
+                    P_new += -(P_new@ft@ft.T@P_new)/(ft.T@P_new@ft + self.sigma**2)
+                    # Iterative computation of matrix C according to formula (5.7) of [1]
+                    C_matrix = (np.eye(d) - (P_new@ft)@ft.T)@C_matrix
+                    theta += P_new@ft * (yt - theta.T@ft)/ (self.sigma**2) 
+                    P_new += self.Q
+
+                ft = f_Xtest[t,:].reshape(-1,1)
+                y_mean[t] = self.theta.T@ft                             # Mean prediction
+                y_std[t] = np.sqrt(self.sigma**2 + ft.T@(P_new+95*self.Q)@ft)      # Standard deviation of the prediction
+                
+                
+                num += (Y_test[t] - y_mean[t])/(self.sigma**2 + ft.T@(P_new+95*self.Q)@ft)*C_matrix.T@ft
+                inv += C_matrix.T@ft@ft.T@C_matrix/(self.sigma**2 + ft.T@(P_new+95*self.Q)@ft)
+                
                  
-        # Computation of vector theta1 according to the formula 
+        # Computation of vector theta1 according to the Formula (3.11)
         theta1 = np.linalg.inv(inv)@num
         return theta1
     
 ###################### Kalman Filter variance-covariance optimization ##############################
 class Q_optimization(object):
     """Class which optimizes the variances (Q and sigma) of the dynamic Kalman Filter by performing a grid search and by 
-       using different metrics (RMSE and Likelihood).
+       maximizing the likelihood.
        """
     def __init__(self, X_train, y_train, gam_model=None, GAM=False, total_mat=True, params=None):
         self.X_train = X_train # Features of the training set
@@ -411,122 +422,13 @@ class Q_optimization(object):
         self.total_mat = total_mat 
         self.params = None if params is None else np.array(params)
         
-    def grid_search(self, q_list=[1,1e-5,1e-10], sigma_list=[1,0.5,0.1], method="RMSE", std_static=None):
-        """This method returns the optimal matrix Q, the optimal sigma and P_1|0=sigma^2*I_d by performing a grid search on a grid 
-        of q values and on a grid of sigma values. 
-        std_static is an optional input vector which represents the standard deviation of each parameter in the vector theta, obtained on the training set           by the Static Kalman Filter. 
-        This method assumes that Q = q*I_d where I_d is an identity matrix if std_static is None otherwise Q = q*diag(std_static^2).
-        The optimal matrices can be obtained by either minimizing the RMSE or by maximizing the likelihood on the training set."""
-        
-        min_RMSE = np.inf
-        max_loglik = -np.inf
-        optimal_q = None
-        optimal_sigma = None
-        self.method = method 
-        
-        # For each q and for each sigma we compute the RMSE or the likelihood and choose the combination of (q, sigma) minimizing the RMSE or maximing the           # Likelihood
-        for q in q_list:
-            if self.method == "RMSE":
-                q_metric = np.inf
-            elif self.method == "Likelihood":
-                q_metric = -np.inf
-            else:
-                print("Method not supported.")
-                
-            for sigma in sigma_list:
-                print(q, sigma)
-                    
-                # Initialization of the matrices and the KF according to the model (GAM or linear regression)
-                if self.GAM:
-                    n_terms = len(list(self.gam_model.terms))
-                    if std_static is None:
-                        Q = np.eye(n_terms)*q
-                        P = np.eye(n_terms)
-                    else:
-                        Q = np.diag(std_static**2)*q
-                        P = np.eye(n_terms)
-                    
-                    kf = Kalman_Filter(gam_model=self.gam_model, Q=Q, sigma=sigma, P=P)
-                else:
-                    if self.total_mat:
-                        if std_static is None:
-                            Q = np.eye(np.shape(self.X_train)[1])*q
-                            P = np.eye(np.shape(self.X_train)[1])
-                        else:
-                            Q = np.diag(std_static**2)*q
-                            P = np.eye(np.shape(self.X_train)[1])
-                            
-                        kf = Kalman_Filter(GAM=False, Q=Q, sigma=sigma, P=P)
-                    else:
-                        n_terms = len(groups)
-                        if std_static is None:
-                            Q = np.eye(n_terms)*q
-                            P = np.eye(n_terms)
-                        else:
-                            Q = np.diag(std_static**2)*q
-                            P = np.eye(n_terms)
-                            
-                        kf = Kalman_Filter(GAM=False, total_mat=False,params=self.params, Q=Q, sigma=sigma, P=P)
-                  
-                if self.method == "RMSE":
-                    target_var = self.y_train[self.y_train.columns[1]]
-                    # Fit the KF on the train set and compute predictions to compute the RMSE on the train set
-                    kf.fit(self.X_train, target_var)
-                    y_hat, _ = kf.predict(self.X_train, self.y_train, delay=True)
-
-                    new_RMSE = self.RMSE(target_var, y_hat)
-
-                    if new_RMSE < min_RMSE:
-                        min_RMSE = new_RMSE
-                        optimal_q = q
-                        optimal_sigma = sigma
-                    # Sigma in the list are ordered decreasingly. If decreasing sigma increases the RMSE we skip to the next q (decreasing further won't                         # improve the metric)
-                    if new_RMSE > q_metric:
-                        break
-                    q_metric = new_RMSE
-                    sigma_list = sigma_list[sigma_list.index(sigma):]
-                    
-                elif self.method == "Likelihood":
-                    y_hat, _, loglik = kf.compute_likelihood(self.X_train, self.y_train)
-                    print(loglik)
-                    if loglik > max_loglik:
-                        max_loglik = loglik
-                        optimal_q = q
-                        optimal_sigma = sigma   
-                    # Sigma in the list are ordered decreasingly. If decreasing sigma decreases the loglikelihood we skip to the next q (decreasing further                     # won't improve the metric)
-                    if loglik < q_metric:
-                        break
-                    q_metric = loglik
-                    sigma_list = sigma_list[sigma_list.index(sigma):]
-                
-        print("Optimal values q and sigma: ", optimal_q, optimal_sigma)
-        
-        # Returning Q, sigma, P_1|0 and theta_1|0 according to the model
-        if self.GAM:
-            n_terms = len(list(self.gam_model.terms))
-            if std_static is None:
-                return np.eye(n_terms)*optimal_q, optimal_sigma, np.eye(n_terms)*optimal_sigma**2
-            else:
-                return np.diag(std_static**2)*optimal_q, optimal_sigma, np.eye(n_terms)*optimal_sigma**2
-        else:
-            if self.total_mat:
-                if std_static is None:
-                    return np.eye(np.shape(self.X_train)[1])*optimal_q, optimal_sigma, np.eye(np.shape(self.X_train)[1])*optimal_sigma**2
-                else:
-                    return np.diag(std_static**2)*optimal_q, optimal_sigma, np.eye(np.shape(self.X_train)[1])*optimal_sigma**2
-            else:
-                n_terms = len(groups)
-                if std_static is None:
-                    return np.eye(n_terms)*optimal_q, optimal_sigma, np.eye(n_terms)*optimal_sigma**2
-                else:
-                    return np.diag(std_static**2)*optimal_q, optimal_sigma, np.eye(n_terms)*optimal_sigma**2
-    
-    def grid_search_reduced_likelihood(self, q_list=[1,1e-5,1e-10], std_static=None, fit_theta1=False):
+     
+    def grid_search_reduced_likelihood(self, q_list=[1,1e-5,1e-10], std_static=None, const_delay=True,fit_theta1=False):
         """This method returns the optimal matrix Q, the optimal sigma, P_1|0=sigma^2*I_d and theta_1|0 by performing a grid search on a single grid 
         of q* values. 
         std_static is an optional input vector which represents the standard deviation of each parameter in the vector theta, obtained on the training set           by the Static Kalman Filter. 
         This method assumes that Q* = (q*)*I_d where I_d is an identity matrix if std_static is None otherwise Q = (q*)*diag(std_static^2).
-        The optimal matrices are obtained by maximizing the likelihood on the training set."""
+        The optimal matrices are obtained by maximizing the likelihood (Formula (3.13)) on the training set."""
         
         # Since Q*=Q/sigma^2 and P*=P/sigma^2 we can continue to use the previous notation (i.e. Q and P) if we set sigma=1
         max_loglik = -np.inf
@@ -569,7 +471,7 @@ class Q_optimization(object):
 
                     kf = Kalman_Filter(GAM=False, total_mat=False,params=self.params, Q=Q, sigma=sigma, P=P)
             
-            y_hat, _, loglik = kf.compute_reduced_likelihood(self.X_train, self.y_train, fit_theta1=fit_theta1)
+            y_hat, _, loglik = kf.compute_reduced_likelihood(self.X_train, self.y_train, const_delay=const_delay, fit_theta1=fit_theta1)
             print(loglik)
             if loglik > max_loglik:
                 max_loglik = loglik
@@ -599,11 +501,6 @@ class Q_optimization(object):
                     return np.eye(n_terms)*optimal_q, optimal_sigma, np.eye(n_terms)*optimal_sigma**2,optimal_theta1
                 else:
                     return np.diag(std_static**2)*optimal_q, optimal_sigma, np.eye(n_terms)*optimal_sigma**2,optimal_theta1
-         
-        
-    def RMSE(self, y, yhat):
-        """This method computes the Root Mean Square Error of the prediction yhat wrt to the vector y """
-        return np.sqrt(np.sum((y-yhat)**2)/len(y))
 
         
         
@@ -629,12 +526,15 @@ class Persistence_Benchmark(object):
 ######## Mean Performance Evaluation metrics
 
 def RMSE(y, yhat):
+    """This method computes the Root Mean Square Error of the prediction yhat wrt to the vector y """
     return np.sqrt(np.sum((y-yhat)**2)/len(y))
 
 def MAE(y, yhat):
+    """This method computes the Mean Absolute Error of the prediction yhat wrt to the vector y """
     return 1/len(y)*np.sum(np.abs(y-yhat))
 
 def MAPE(y, yhat):
+    """This method computes the Mean Absolute Percentage Error of the prediction yhat wrt to the vector y """
     return 1/len(y)*np.sum(np.abs((y-yhat)/y))
 
 def nRMSE(y_mat, yhat_mat):
