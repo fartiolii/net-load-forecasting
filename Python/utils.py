@@ -315,6 +315,7 @@ class Kalman_Filter(object):
 
                 ft = f_Xtest[t,:].reshape(-1,1)
                 y_mean[t] = self.theta.T@ft                             # Mean prediction
+                y_std[t] = np.sqrt(self.sigma**2 + ft.T@(self.P+95*self.Q)@ft)
 
                 err = (Y_test[t] - y_mean[t])**2
                 loglik += np.log(y_std[t]**2)
@@ -397,7 +398,6 @@ class Kalman_Filter(object):
 
                 ft = f_Xtest[t,:].reshape(-1,1)
                 y_mean[t] = self.theta.T@ft                             # Mean prediction
-                y_std[t] = np.sqrt(self.sigma**2 + ft.T@(P_new+95*self.Q)@ft)      # Standard deviation of the prediction
                 
                 
                 num += (Y_test[t] - y_mean[t])/(self.sigma**2 + ft.T@(P_new+95*self.Q)@ft)*C_matrix.T@ft
