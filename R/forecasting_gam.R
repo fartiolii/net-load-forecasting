@@ -13,13 +13,14 @@ Version <- "9_2"
 
 setwd(dirname(getActiveDocumentContext()$path))
 
+# This file contains the GAM-Point model forecasts
 
-## Load and Prep Dataset ####
+## Reading dataset
 NodeData <- readRDS("data_processed.Rda")
 
 
 
-## List of Model Formulae ####
+## List of Model Formulas
 {Model_list <- list()
 
 ## Vanilla
@@ -155,7 +156,7 @@ GAM_models <- list()
 y_GAM <- list()
 y_pred <- list()
 
-# Splitting the dataset in train and test set for every region
+# Splitting the dataset in train and test set for every GSP Group
 for(N in allNs){
   NodeTrain[[N]] <- NodeData[[N]][NodeData[[N]]$"targetTime" < "2019-01-02", ][1:(nrow(NodeData[[N]][NodeData[[N]]$"targetTime" < "2019-01-02", ])-46),]
   NodeTest[[N]] <- NodeData[[N]][NodeData[[N]]$"targetTime" >= "2019-01-01", ][3:nrow(NodeData[[N]][NodeData[[N]]$"targetTime" >= "2019-01-01", ]),]
@@ -164,18 +165,15 @@ for(N in allNs){
   NodeTest[[N]] <- data.table(NodeTest[[N]])
 }  
 
+# GAM-Point model training (using bam function of mgcv)
 for(N in allNs){
-  # GAM model (bam function of mgcv)
   print(N)
   GAM_models[[N]] <- bam(formula=Model_list[7]$`GAM-Point`,
                               data=NodeTrain[[N]])
 }  
 
 
-idx_2020 = 17516
-idx_2021 = 35104
-
-# Offline GAM 
+# GAM-Point model predictions
 for(N in allNs){
   y_pred[[N]] <- predict(GAM_models[[N]],newdata=NodeTest[[N]])
   y_GAM[[N]] <- data.frame(y_pred[[N]])
@@ -186,7 +184,11 @@ for(N in allNs){
 }
 
 
-# GAM with yearly udpate 
+# Indexes corresponding to the first data point in 2020 and the first data point in 2021
+idx_2020 = 17516
+idx_2021 = 35104
+
+# GAM-Point model with yearly update 
 for(N in allNs){  
     y_pred[[N]] <- predict(GAM_models[[N]],newdata=NodeTest[[N]][1:idx_2020, ])
     
