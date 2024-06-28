@@ -7,7 +7,6 @@ import time
 from datetime import date, datetime, timezone, timedelta
 import datetime
 import pytz
-import astral, astral.sun
 from scipy.stats import norm
 import copy
 import warnings
@@ -163,13 +162,13 @@ def regression_feature_matrix(df):
                    # Population-weighted temperature by clock-time
                    temp*clock_hour, (clock_hour*temp)**2, (clock_hour*temp)**3,
                    
+                   # 48h rolling mean point temperature
+                   x2t_sm, x2t_sm**2, x2t_sm**3,
+                   
                    # Second order Fourier (daily) by population-weighted temperature
                    temp*np.cos(wd*clock_hour), temp*np.sin(wd*clock_hour),
                    temp*np.cos(2*wd*clock_hour), temp*np.sin(2*wd*clock_hour),
                    temp*np.cos(3*wd*clock_hour), temp*np.sin(3*wd*clock_hour),
-                   
-                   # 48h rolling mean point temperature
-                   x2t_sm, x2t_sm**2, x2t_sm**3,
                    
                    # Mean precipitation
                    prec, prec**2, 
