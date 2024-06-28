@@ -239,7 +239,7 @@ class Kalman_Filter(object):
                 self.theta1 = self.params.reshape(-1,1) 
             if self.theta1 is None:
                 # For GAM models, if the initial state is not given we set it to a vector of ones.
-                self.theta1 = np.zeros((self.d,1))
+                self.theta1 = np.ones((self.d,1))
         self.theta = self.theta1.copy()
         
         if const_delay is False:
